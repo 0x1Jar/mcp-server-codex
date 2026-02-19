@@ -1,10 +1,13 @@
 package net.portswigger.mcp.tools
 
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import kotlinx.serialization.json.Json
+import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.JTabbedPane
 import javax.swing.JTextArea
@@ -67,6 +70,80 @@ class RepeaterUiToolsTest {
     }
 
     @Test
+    fun `findRepeaterRequestTabsPane should stay stable with split panel and inspector tabs`() {
+        val repeaterRoot = JPanel().apply {
+            layout = null
+            setSize(1920, 1080)
+        }
+
+        val topLeftRequestTabs = JTabbedPane().apply {
+            addTab("1", JPanel())
+            addTab("2", JPanel())
+            addTab("3", JPanel())
+            setBounds(12, 8, 260, 46)
+        }
+
+        val responseSubTabs = JTabbedPane().apply {
+            addTab("Pretty", JPanel())
+            addTab("Raw", JPanel())
+            addTab("Hex", JPanel())
+            addTab("Render", JPanel())
+            setBounds(980, 210, 420, 120)
+        }
+
+        val inspectorTabs = JTabbedPane().apply {
+            addTab("Request attributes", JPanel())
+            addTab("Request parameters", JPanel())
+            addTab("Request headers", JPanel())
+            addTab("Response headers", JPanel())
+            setBounds(1460, 120, 420, 420)
+        }
+
+        repeaterRoot.add(inspectorTabs)
+        repeaterRoot.add(responseSubTabs)
+        repeaterRoot.add(topLeftRequestTabs)
+
+        val detected = findRepeaterRequestTabsPane(repeaterRoot)
+
+        assertSame(topLeftRequestTabs, detected)
+    }
+
+    @Test
+    fun `findRepeaterRequestTabsPane should prefer top-left user tabs when many panes exist`() {
+        val repeaterRoot = JPanel().apply {
+            layout = null
+            setSize(1600, 900)
+        }
+
+        val requestTabs = JTabbedPane().apply {
+            addTab("Login", JPanel())
+            addTab("Orders", JPanel())
+            addTab("Profile", JPanel())
+            setBounds(8, 8, 320, 44)
+        }
+
+        val lowerPaneTabs = JTabbedPane().apply {
+            addTab("Notes", JPanel())
+            addTab("Logger", JPanel())
+            setBounds(20, 620, 500, 220)
+        }
+
+        val rightPaneTabs = JTabbedPane().apply {
+            addTab("Request", JPanel())
+            addTab("Response", JPanel())
+            setBounds(1160, 210, 360, 180)
+        }
+
+        repeaterRoot.add(lowerPaneTabs)
+        repeaterRoot.add(rightPaneTabs)
+        repeaterRoot.add(requestTabs)
+
+        val detected = findRepeaterRequestTabsPane(repeaterRoot)
+
+        assertSame(requestTabs, detected)
+    }
+
+    @Test
     fun `extractBestHttpRequestText should choose request-like text`() {
         val root = JPanel()
         val responseText = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nok"
@@ -103,6 +180,49 @@ class RepeaterUiToolsTest {
         val extracted = extractBestHttpRequestText(root)
 
         assertTrue(extracted == null)
+    }
+
+    @Test
+    fun `getRepeaterTabComponentAtIndex should resolve valid index and reject out of range`() {
+        val tabs = JTabbedPane()
+        val first = JLabel("first")
+        val second = JLabel("second")
+        tabs.addTab("1", first)
+        tabs.addTab("2", second)
+
+        assertSame(first, getRepeaterTabComponentAtIndex(tabs, 0))
+        assertSame(second, getRepeaterTabComponentAtIndex(tabs, 1))
+        assertNull(getRepeaterTabComponentAtIndex(tabs, -1))
+        assertNull(getRepeaterTabComponentAtIndex(tabs, 2))
+    }
+
+    @Test
+    fun `redactSensitiveData should mask common sensitive headers and params by default`() {
+        val raw = """
+            GET /api?token=abc123&lang=en HTTP/1.1
+            Host: example.com
+            Authorization: Bearer secret-token
+            Cookie: sessionid=super-secret
+            Content-Type: application/json
+            
+            {"access_token":"abc","normal":"safe"}
+        """.trimIndent()
+
+        val redacted = redactSensitiveData(raw, includeSensitive = false)
+
+        assertTrue(redacted.contains("authorization: <redacted>", ignoreCase = true))
+        assertTrue(redacted.contains("cookie: <redacted>", ignoreCase = true))
+        assertTrue(redacted.contains("token=<redacted>"))
+        assertTrue(redacted.contains("\"access_token\":\"<redacted>\""))
+        assertFalse(redacted.contains("secret-token"))
+        assertFalse(redacted.contains("super-secret"))
+    }
+
+    @Test
+    fun `redactSensitiveData should preserve raw content when includeSensitive true`() {
+        val raw = "Authorization: Bearer keep-this\nCookie: sessionid=keep-me"
+        val output = redactSensitiveData(raw, includeSensitive = true)
+        assertEquals(raw, output)
     }
 
     @Test

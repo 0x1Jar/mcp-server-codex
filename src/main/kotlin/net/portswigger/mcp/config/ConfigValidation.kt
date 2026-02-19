@@ -6,8 +6,14 @@ object ConfigValidation {
         val trimmedHost = host.trim()
         val port = portText.trim().toIntOrNull()
 
-        if (trimmedHost.isBlank() || !trimmedHost.matches(Regex("^[a-zA-Z0-9.-]+$"))) {
-            return "Host must be a non-empty alphanumeric string"
+        if (trimmedHost.isBlank()) {
+            return "Host must not be empty"
+        }
+
+        // Keep host validation flexible for local/lab/mobile pentest setups:
+        // allow hostname, IPv4, IPv6, and custom local names, but reject obvious invalid separators.
+        if (trimmedHost.any { it.isWhitespace() } || trimmedHost.contains("/") || trimmedHost.contains("\\")) {
+            return "Host contains invalid characters"
         }
 
         if (port == null) {

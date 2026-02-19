@@ -17,6 +17,7 @@ class ServerConfigurationPanel(
 
     private lateinit var alwaysAllowHttpHistoryCheckBox: JCheckBox
     private lateinit var alwaysAllowWebSocketHistoryCheckBox: JCheckBox
+    private lateinit var alwaysAllowRepeaterAccessCheckBox: JCheckBox
 
     init {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
@@ -77,6 +78,16 @@ class ServerConfigurationPanel(
             config.requireHistoryAccessApproval
         ) { config.alwaysAllowWebSocketHistory = it }
         add(alwaysAllowWebSocketHistoryCheckBox)
+        add(createVerticalStrut(Design.Spacing.MD))
+
+        val repeaterAccessApprovalCheckBox = createRepeaterAccessApprovalCheckBox()
+        add(repeaterAccessApprovalCheckBox)
+        add(createVerticalStrut(Design.Spacing.SM))
+
+        alwaysAllowRepeaterAccessCheckBox = createIndentedCheckBox(
+            "Always allow Repeater access", config.alwaysAllowRepeaterAccess, config.requireRepeaterAccessApproval
+        ) { config.alwaysAllowRepeaterAccess = it }
+        add(alwaysAllowRepeaterAccessCheckBox)
 
         add(validationErrorLabel)
     }
@@ -111,10 +122,24 @@ class ServerConfigurationPanel(
         }
     }
 
+    private fun createRepeaterAccessApprovalCheckBox(): JCheckBox {
+        return createStandardCheckBox(
+            "Require approval for Repeater access", config.requireRepeaterAccessApproval
+        ) { enabled ->
+            config.requireRepeaterAccessApproval = enabled
+            if (!enabled) {
+                config.alwaysAllowRepeaterAccess = false
+                alwaysAllowRepeaterAccessCheckBox.isSelected = false
+            }
+            alwaysAllowRepeaterAccessCheckBox.isEnabled = enabled
+        }
+    }
+
     fun updateHistoryAccessCheckboxes() {
         SwingUtilities.invokeLater {
             alwaysAllowHttpHistoryCheckBox.isSelected = config.alwaysAllowHttpHistory
             alwaysAllowWebSocketHistoryCheckBox.isSelected = config.alwaysAllowWebSocketHistory
+            alwaysAllowRepeaterAccessCheckBox.isSelected = config.alwaysAllowRepeaterAccess
         }
     }
 

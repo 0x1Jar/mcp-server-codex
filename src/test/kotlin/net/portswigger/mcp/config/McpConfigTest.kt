@@ -25,6 +25,8 @@ class McpConfigTest {
                 storage[key] as? Boolean ?: when (key) {
                     "enabled" -> true
                     "requireHttpRequestApproval" -> true
+                    "requireHistoryAccessApproval" -> true
+                    "requireRepeaterAccessApproval" -> true
                     else -> false
                 }
             }
@@ -248,5 +250,18 @@ class McpConfigTest {
         config.requireHttpRequestApproval = true
         assertTrue(config.requireHttpRequestApproval)
         verify { persistedObject.setBoolean("requireHttpRequestApproval", true) }
+    }
+
+    @Test
+    fun `requireRepeaterAccessApproval should default to true and persist correctly`() {
+        assertTrue(config.requireRepeaterAccessApproval)
+
+        config.requireRepeaterAccessApproval = false
+        assertFalse(config.requireRepeaterAccessApproval)
+        verify { persistedObject.setBoolean("requireRepeaterAccessApproval", false) }
+
+        config.requireRepeaterAccessApproval = true
+        assertTrue(config.requireRepeaterAccessApproval)
+        verify { persistedObject.setBoolean("requireRepeaterAccessApproval", true) }
     }
 }

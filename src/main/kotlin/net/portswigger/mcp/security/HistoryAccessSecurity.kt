@@ -70,10 +70,17 @@ object HistoryAccessSecurity {
 
     var approvalHandler: HistoryAccessApprovalHandler = SwingHistoryAccessApprovalHandler()
 
+    private fun isApprovalRequired(accessType: HistoryAccessType, config: McpConfig): Boolean {
+        return when (accessType) {
+            HistoryAccessType.REPEATER -> config.requireRepeaterAccessApproval
+            HistoryAccessType.HTTP_HISTORY, HistoryAccessType.WEBSOCKET_HISTORY -> config.requireHistoryAccessApproval
+        }
+    }
+
     suspend fun checkHistoryAccessPermission(
         accessType: HistoryAccessType, config: McpConfig
     ): Boolean {
-        if (!config.requireHistoryAccessApproval) {
+        if (!isApprovalRequired(accessType, config)) {
             return true
         }
 

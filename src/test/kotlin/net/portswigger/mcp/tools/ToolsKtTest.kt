@@ -27,6 +27,9 @@ import io.modelcontextprotocol.kotlin.sdk.TextContent
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.encodeToJsonElement
 import net.portswigger.mcp.KtorServerManager
 import net.portswigger.mcp.ServerState
@@ -59,8 +62,10 @@ class ToolsKtTest {
             every { getBoolean("configEditingTooling") } returns true
             every { getBoolean("requireHttpRequestApproval") } returns false
             every { getBoolean("requireHistoryAccessApproval") } returns false
+            every { getBoolean("requireRepeaterAccessApproval") } returns false
             every { getBoolean("_alwaysAllowHttpHistory") } returns false
             every { getBoolean("_alwaysAllowWebSocketHistory") } returns false
+            every { getBoolean("_alwaysAllowRepeaterAccess") } returns false
             every { getString("host") } returns "127.0.0.1"
             every { getString("autoApproveTargets") } returns ""
             every { getInteger("port") } returns testPort
@@ -98,11 +103,34 @@ class ToolsKtTest {
         val text = textContent!!.text
         assertNotNull(text, "Text content cannot be null")
 
+        val extracted = extractPayloadText(text!!)
+
         if (expected != null) {
-            assertEquals(expected, text, "Text content doesn't match expected value")
+            assertEquals(expected, extracted, "Text content doesn't match expected value")
         }
 
-        return text!!
+        return extracted
+    }
+
+    private fun extractPayloadText(text: String): String {
+        val parsed = runCatching { Json.parseToJsonElement(text) }.getOrNull() as? JsonObject ?: return text
+        val hasEnvelope = parsed.containsKey("status") &&
+            parsed.containsKey("message") &&
+            parsed.containsKey("data") &&
+            parsed.containsKey("error_code")
+
+        if (!hasEnvelope) return text
+
+        val data = parsed["data"]
+        if (data == null || data is JsonNull) {
+            return parsed["message"]?.jsonPrimitive?.content ?: ""
+        }
+
+        return if (data is kotlinx.serialization.json.JsonPrimitive && data.isString) {
+            data.content
+        } else {
+            data.toString()
+        }
     }
 
     private fun setupHttpHeaderMocks() {
@@ -607,7 +635,7 @@ class ToolsKtTest {
                 val result = client.callTool("get_active_editor_contents", emptyMap())
                 
                 delay(100)
-                result.expectTextContent("<No active editor>")
+                result.expectTextContent("No active editor")
             }
         }
         
@@ -641,7 +669,7 @@ class ToolsKtTest {
                 )
                 
                 delay(100)
-                result.expectTextContent("<No active editor>")
+                result.expectTextContent("No active editor")
             }
         }
         
@@ -661,7 +689,7 @@ class ToolsKtTest {
                 )
                 
                 delay(100)
-                result.expectTextContent("<Current editor is not editable>")
+                result.expectTextContent("Current editor is not editable")
             }
         }
         
@@ -754,7 +782,7 @@ class ToolsKtTest {
                 )
                 
                 delay(100)
-                assertEquals("Reached end of items", result3.expectTextContent())
+                assertEquals("reached_end_of_items", result3.expectTextContent())
             }
         }
     }

@@ -11,6 +11,7 @@ import burp.api.montoya.http.message.HttpHeader
 import burp.api.montoya.http.message.requests.HttpRequest
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import net.portswigger.mcp.config.McpConfig
@@ -31,6 +32,7 @@ private suspend fun checkHistoryPermissionOrDeny(
     accessType: HistoryAccessType, config: McpConfig, api: MontoyaApi, logMessage: String
 ): Boolean {
     val allowed = HistoryAccessSecurity.checkHistoryAccessPermission(accessType, config)
+    auditLog(api, "category=history_access type=$accessType decision=${if (allowed) "allow" else "deny"}")
     if (!allowed) {
         api.logging().logToOutput("MCP $logMessage access denied")
         return false
@@ -47,17 +49,55 @@ private fun truncateIfNeeded(serialized: String): String {
     }
 }
 
+private fun auditLog(api: MontoyaApi, event: String) {
+    api.logging().logToOutput("[MCP-AUDIT] $event")
+}
+
+private val sensitiveQueryParamRegex = Regex(
+    "(?i)([?&](?:token|session(?:id)?|auth(?:orization)?|api[_-]?key|access[_-]?token|refresh[_-]?token|jwt)=)([^&\\s]+)"
+)
+private val sensitiveFormParamRegex = Regex(
+    "(?im)((?:^|&)(?:token|session(?:id)?|auth(?:orization)?|api[_-]?key|access[_-]?token|refresh[_-]?token|jwt)=)([^&\\r\\n]+)"
+)
+private val sensitiveJsonFieldRegex = Regex(
+    "(?i)(\"(?:token|session(?:id)?|auth(?:orization)?|api[_-]?key|access[_-]?token|refresh[_-]?token|jwt|cookie)\"\\s*:\\s*\")(.*?)(\")"
+)
+private val sensitiveHeaderRegex = Regex(
+    "(?im)^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token|x-session-id)\\s*:\\s*(.+)$"
+)
+private val bearerRegex = Regex("(?i)\\bBearer\\s+[A-Za-z0-9._\\-+/=]+")
+
+internal fun redactSensitiveData(raw: String, includeSensitive: Boolean): String {
+    if (includeSensitive) return raw
+
+    var sanitized = raw
+    sanitized = sensitiveHeaderRegex.replace(sanitized) { match ->
+        "${match.groupValues[1]}: <redacted>"
+    }
+    sanitized = bearerRegex.replace(sanitized, "Bearer <redacted>")
+    sanitized = sensitiveQueryParamRegex.replace(sanitized, "$1<redacted>")
+    sanitized = sensitiveFormParamRegex.replace(sanitized, "$1<redacted>")
+    sanitized = sensitiveJsonFieldRegex.replace(sanitized, "$1<redacted>$3")
+    return sanitized
+}
+
+private fun toolDenied(message: String, code: String): String = toolError(message = message, errorCode = code)
+
 fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
+    ToolAuditLogger.sink = { line -> api.logging().logToOutput(line) }
 
     mcpTool<SendHttp1Request>("Issues an HTTP/1.1 request and returns the response.") {
+        auditLog(api, "category=http_request tool=send_http1_request target=$targetHostname:$targetPort")
         val allowed = runBlocking {
             HttpRequestSecurity.checkHttpRequestPermission(targetHostname, targetPort, config, content, api)
         }
         if (!allowed) {
+            auditLog(api, "category=http_request tool=send_http1_request decision=deny target=$targetHostname:$targetPort")
             api.logging().logToOutput("MCP HTTP request denied: $targetHostname:$targetPort")
-            return@mcpTool "Send HTTP request denied by Burp Suite"
+            return@mcpTool toolDenied("Send HTTP request denied by Burp Suite", "HTTP_REQUEST_DENIED")
         }
 
+        auditLog(api, "category=http_request tool=send_http1_request decision=allow target=$targetHostname:$targetPort")
         api.logging().logToOutput("MCP HTTP/1.1 request: $targetHostname:$targetPort")
 
         val fixedContent = content.replace("\r", "").replace("\n", "\r\n")
@@ -69,6 +109,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
     }
 
     mcpTool<SendHttp2Request>("Issues an HTTP/2 request and returns the response. Do NOT pass headers to the body parameter.") {
+        auditLog(api, "category=http_request tool=send_http2_request target=$targetHostname:$targetPort")
         val http2RequestDisplay = buildString {
             pseudoHeaders.forEach { (key, value) ->
                 val headerName = if (key.startsWith(":")) key else ":$key"
@@ -87,10 +128,12 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             HttpRequestSecurity.checkHttpRequestPermission(targetHostname, targetPort, config, http2RequestDisplay, api)
         }
         if (!allowed) {
+            auditLog(api, "category=http_request tool=send_http2_request decision=deny target=$targetHostname:$targetPort")
             api.logging().logToOutput("MCP HTTP request denied: $targetHostname:$targetPort")
-            return@mcpTool "Send HTTP request denied by Burp Suite"
+            return@mcpTool toolDenied("Send HTTP request denied by Burp Suite", "HTTP_REQUEST_DENIED")
         }
 
+        auditLog(api, "category=http_request tool=send_http2_request decision=allow target=$targetHostname:$targetPort")
         api.logging().logToOutput("MCP HTTP/2 request: $targetHostname:$targetPort")
 
         val orderedPseudoHeaderNames = listOf(":scheme", ":method", ":path", ":authority")
@@ -151,14 +194,14 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
 
     mcpTool(
         "output_project_options",
-        "Outputs current project-level configuration in JSON format. You can use this to determine the schema for available config options."
+        "Outputs current Burp project options JSON. Use this first to confirm schema before modifying project-level settings."
     ) {
         api.burpSuite().exportProjectOptionsAsJson()
     }
 
     mcpTool(
         "output_user_options",
-        "Outputs current user-level configuration in JSON format. You can use this to determine the schema for available config options."
+        "Outputs current Burp user options JSON. Use this first to confirm schema before modifying user-level settings."
     ) {
         api.burpSuite().exportUserOptionsAsJson()
     }
@@ -166,26 +209,26 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
     val toolingDisabledMessage =
         "User has disabled configuration editing. They can enable it in the MCP tab in Burp by selecting 'Enable tools that can edit your config'"
 
-    mcpTool<SetProjectOptions>("Sets project-level configuration in JSON format. This will be merged with existing configuration. Make sure to export before doing this, so you know what the schema is. Make sure the JSON has a top level 'user_options' object!") {
+    mcpTool<SetProjectOptions>("Sets project-level configuration in JSON format. This is merged with existing config. Export first to confirm schema. Use a top-level 'project_options' object.") {
         if (config.configEditingTooling) {
             api.logging().logToOutput("Setting project-level configuration: $json")
             api.burpSuite().importProjectOptionsFromJson(json)
 
             "Project configuration has been applied"
         } else {
-            toolingDisabledMessage
+            toolDenied(toolingDisabledMessage, "CONFIG_EDITING_DISABLED")
         }
     }
 
 
-    mcpTool<SetUserOptions>("Sets user-level configuration in JSON format. This will be merged with existing configuration. Make sure to export before doing this, so you know what the schema is. Make sure the JSON has a top level 'project_options' object!") {
+    mcpTool<SetUserOptions>("Sets user-level configuration in JSON format. This is merged with existing config. Export first to confirm schema. Use a top-level 'user_options' object.") {
         if (config.configEditingTooling) {
             api.logging().logToOutput("Setting user-level configuration: $json")
             api.burpSuite().importUserOptionsFromJson(json)
 
             "User configuration has been applied"
         } else {
-            toolingDisabledMessage
+            toolDenied(toolingDisabledMessage, "CONFIG_EDITING_DISABLED")
         }
     }
 
@@ -241,7 +284,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             checkHistoryPermissionOrDeny(HistoryAccessType.HTTP_HISTORY, config, api, "HTTP history")
         }
         if (!allowed) {
-            return@mcpPaginatedTool sequenceOf("HTTP history access denied by Burp Suite")
+            return@mcpPaginatedTool sequenceOf(toolDenied("HTTP history access denied by Burp Suite", "HTTP_HISTORY_DENIED"))
         }
 
         api.proxy().history().asSequence().map { truncateIfNeeded(Json.encodeToString(it.toSerializableForm())) }
@@ -252,7 +295,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             checkHistoryPermissionOrDeny(HistoryAccessType.HTTP_HISTORY, config, api, "HTTP history")
         }
         if (!allowed) {
-            return@mcpPaginatedTool sequenceOf("HTTP history access denied by Burp Suite")
+            return@mcpPaginatedTool sequenceOf(toolDenied("HTTP history access denied by Burp Suite", "HTTP_HISTORY_DENIED"))
         }
 
         val compiledRegex = Pattern.compile(regex)
@@ -265,7 +308,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             checkHistoryPermissionOrDeny(HistoryAccessType.WEBSOCKET_HISTORY, config, api, "WebSocket history")
         }
         if (!allowed) {
-            return@mcpPaginatedTool sequenceOf("WebSocket history access denied by Burp Suite")
+            return@mcpPaginatedTool sequenceOf(toolDenied("WebSocket history access denied by Burp Suite", "WEBSOCKET_HISTORY_DENIED"))
         }
 
         api.proxy().webSocketHistory().asSequence()
@@ -277,7 +320,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             checkHistoryPermissionOrDeny(HistoryAccessType.WEBSOCKET_HISTORY, config, api, "WebSocket history")
         }
         if (!allowed) {
-            return@mcpPaginatedTool sequenceOf("WebSocket history access denied by Burp Suite")
+            return@mcpPaginatedTool sequenceOf(toolDenied("WebSocket history access denied by Burp Suite", "WEBSOCKET_HISTORY_DENIED"))
         }
 
         val compiledRegex = Pattern.compile(regex)
@@ -302,7 +345,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
     }
 
     mcpTool("get_active_editor_contents", "Outputs the contents of the user's active message editor") {
-        getActiveEditor(api)?.text ?: "<No active editor>"
+        getActiveEditor(api)?.text ?: toolDenied("No active editor", "NO_ACTIVE_EDITOR")
     }
 
     mcpTool(
@@ -313,14 +356,14 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             checkHistoryPermissionOrDeny(HistoryAccessType.REPEATER, config, api, "Repeater")
         }
         if (!allowed) {
-            return@mcpTool "Repeater access denied by Burp Suite"
+            return@mcpTool toolDenied("Repeater access denied by Burp Suite", "REPEATER_ACCESS_DENIED")
         }
 
         val repeaterContext = findRepeaterContext(api)
-            ?: return@mcpTool "<Repeater tab not found in Burp UI>"
+            ?: return@mcpTool toolDenied("Repeater tab not found in Burp UI", "REPEATER_TAB_NOT_FOUND")
 
         val tabsPane = findRepeaterRequestTabsPane(repeaterContext.repeaterContent)
-            ?: return@mcpTool "<Could not detect Repeater request tabs>"
+            ?: return@mcpTool toolDenied("Could not detect Repeater request tabs", "REPEATER_TABS_NOT_FOUND")
 
         val tabs = (0 until tabsPane.tabCount).map { index ->
             RepeaterTabInfo(
@@ -339,71 +382,125 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         )
     }
 
-    mcpTool(
-        "get_active_repeater_request",
-        "Reads the raw HTTP request from the currently active Repeater request tab. Repeater must be the active Burp tool tab."
+    mcpTool<GetActiveRepeaterRequest>(
+        "Reads the raw HTTP request from the currently active Repeater request tab. Sensitive values are redacted by default unless include_sensitive=true."
     ) {
         val allowed = runBlocking {
             checkHistoryPermissionOrDeny(HistoryAccessType.REPEATER, config, api, "Repeater")
         }
         if (!allowed) {
-            return@mcpTool "Repeater access denied by Burp Suite"
+            return@mcpTool toolDenied("Repeater access denied by Burp Suite", "REPEATER_ACCESS_DENIED")
         }
 
         val repeaterContext = findRepeaterContext(api)
-            ?: return@mcpTool "<Repeater tab not found in Burp UI>"
+            ?: return@mcpTool toolDenied("Repeater tab not found in Burp UI", "REPEATER_TAB_NOT_FOUND")
 
         if (!repeaterContext.isRepeaterSelected) {
-            return@mcpTool "<Repeater is not currently the active Burp tool tab>"
+            return@mcpTool toolDenied("Repeater is not currently the active Burp tool tab", "REPEATER_NOT_ACTIVE")
         }
 
         val tabsPane = findRepeaterRequestTabsPane(repeaterContext.repeaterContent)
-            ?: return@mcpTool "<Could not detect Repeater request tabs>"
+            ?: return@mcpTool toolDenied("Could not detect Repeater request tabs", "REPEATER_TABS_NOT_FOUND")
 
         val selectedTab = tabsPane.selectedComponent
-            ?: return@mcpTool "<No active Repeater request tab>"
+            ?: return@mcpTool toolDenied("No active Repeater request tab", "REPEATER_NO_ACTIVE_TAB")
 
         val rawRequest = extractBestHttpRequestText(selectedTab)
-            ?: return@mcpTool "<Could not read raw request from active Repeater tab>"
+            ?: return@mcpTool toolDenied("Could not read raw request from active Repeater tab", "REPEATER_REQUEST_NOT_READABLE")
 
-        rawRequest
+        redactSensitiveData(rawRequest, includeSensitive)
     }
 
-    mcpTool(
-        "get_active_repeater_response",
-        "Reads the raw HTTP response from the currently active Repeater request tab. Repeater must be the active Burp tool tab."
+    mcpTool<GetActiveRepeaterResponse>(
+        "Reads the raw HTTP response from the currently active Repeater request tab. Sensitive values are redacted by default unless include_sensitive=true."
     ) {
         val allowed = runBlocking {
             checkHistoryPermissionOrDeny(HistoryAccessType.REPEATER, config, api, "Repeater")
         }
         if (!allowed) {
-            return@mcpTool "Repeater access denied by Burp Suite"
+            return@mcpTool toolDenied("Repeater access denied by Burp Suite", "REPEATER_ACCESS_DENIED")
         }
 
         val repeaterContext = findRepeaterContext(api)
-            ?: return@mcpTool "<Repeater tab not found in Burp UI>"
+            ?: return@mcpTool toolDenied("Repeater tab not found in Burp UI", "REPEATER_TAB_NOT_FOUND")
 
         if (!repeaterContext.isRepeaterSelected) {
-            return@mcpTool "<Repeater is not currently the active Burp tool tab>"
+            return@mcpTool toolDenied("Repeater is not currently the active Burp tool tab", "REPEATER_NOT_ACTIVE")
         }
 
         val tabsPane = findRepeaterRequestTabsPane(repeaterContext.repeaterContent)
-            ?: return@mcpTool "<Could not detect Repeater request tabs>"
+            ?: return@mcpTool toolDenied("Could not detect Repeater request tabs", "REPEATER_TABS_NOT_FOUND")
 
         val selectedTab = tabsPane.selectedComponent
-            ?: return@mcpTool "<No active Repeater request tab>"
+            ?: return@mcpTool toolDenied("No active Repeater request tab", "REPEATER_NO_ACTIVE_TAB")
 
         val rawResponse = extractBestHttpResponseText(selectedTab)
-            ?: return@mcpTool "<Could not read raw response from active Repeater tab>"
+            ?: return@mcpTool toolDenied("Could not read raw response from active Repeater tab", "REPEATER_RESPONSE_NOT_READABLE")
 
-        rawResponse
+        redactSensitiveData(rawResponse, includeSensitive)
+    }
+
+    mcpTool<GetRepeaterRequestByIndex>(
+        "Reads the raw HTTP request from a specific Repeater request tab index. Sensitive values are redacted by default unless include_sensitive=true."
+    ) {
+        val allowed = runBlocking {
+            checkHistoryPermissionOrDeny(HistoryAccessType.REPEATER, config, api, "Repeater")
+        }
+        if (!allowed) {
+            return@mcpTool toolDenied("Repeater access denied by Burp Suite", "REPEATER_ACCESS_DENIED")
+        }
+
+        val repeaterContext = findRepeaterContext(api)
+            ?: return@mcpTool toolDenied("Repeater tab not found in Burp UI", "REPEATER_TAB_NOT_FOUND")
+
+        val tabsPane = findRepeaterRequestTabsPane(repeaterContext.repeaterContent)
+            ?: return@mcpTool toolDenied("Could not detect Repeater request tabs", "REPEATER_TABS_NOT_FOUND")
+
+        val selectedTab = getRepeaterTabComponentAtIndex(tabsPane, index)
+            ?: return@mcpTool toolDenied(
+                "Repeater tab index $index is out of range (0..${tabsPane.tabCount - 1})",
+                "REPEATER_TAB_INDEX_OUT_OF_RANGE"
+            )
+
+        val rawRequest = extractBestHttpRequestText(selectedTab)
+            ?: return@mcpTool toolDenied("Could not read raw request from Repeater tab index $index", "REPEATER_REQUEST_NOT_READABLE")
+
+        redactSensitiveData(rawRequest, includeSensitive)
+    }
+
+    mcpTool<GetRepeaterResponseByIndex>(
+        "Reads the raw HTTP response from a specific Repeater request tab index. Sensitive values are redacted by default unless include_sensitive=true."
+    ) {
+        val allowed = runBlocking {
+            checkHistoryPermissionOrDeny(HistoryAccessType.REPEATER, config, api, "Repeater")
+        }
+        if (!allowed) {
+            return@mcpTool toolDenied("Repeater access denied by Burp Suite", "REPEATER_ACCESS_DENIED")
+        }
+
+        val repeaterContext = findRepeaterContext(api)
+            ?: return@mcpTool toolDenied("Repeater tab not found in Burp UI", "REPEATER_TAB_NOT_FOUND")
+
+        val tabsPane = findRepeaterRequestTabsPane(repeaterContext.repeaterContent)
+            ?: return@mcpTool toolDenied("Could not detect Repeater request tabs", "REPEATER_TABS_NOT_FOUND")
+
+        val selectedTab = getRepeaterTabComponentAtIndex(tabsPane, index)
+            ?: return@mcpTool toolDenied(
+                "Repeater tab index $index is out of range (0..${tabsPane.tabCount - 1})",
+                "REPEATER_TAB_INDEX_OUT_OF_RANGE"
+            )
+
+        val rawResponse = extractBestHttpResponseText(selectedTab)
+            ?: return@mcpTool toolDenied("Could not read raw response from Repeater tab index $index", "REPEATER_RESPONSE_NOT_READABLE")
+
+        redactSensitiveData(rawResponse, includeSensitive)
     }
 
     mcpTool<SetActiveEditorContents>("Sets the content of the user's active message editor") {
-        val editor = getActiveEditor(api) ?: return@mcpTool "<No active editor>"
+        val editor = getActiveEditor(api) ?: return@mcpTool toolDenied("No active editor", "NO_ACTIVE_EDITOR")
 
         if (!editor.isEditable) {
-            return@mcpTool "<Current editor is not editable>"
+            return@mcpTool toolDenied("Current editor is not editable", "EDITOR_NOT_EDITABLE")
         }
 
         editor.text = text
@@ -593,6 +690,14 @@ private fun findDescendants(root: Component): Sequence<Component> = sequence {
     }
 }
 
+private fun JTabbedPane.getComponentAtOrNull(index: Int): Component? {
+    return if (index in 0 until tabCount) getComponentAt(index) else null
+}
+
+internal fun getRepeaterTabComponentAtIndex(tabsPane: JTabbedPane, index: Int): Component? {
+    return tabsPane.getComponentAtOrNull(index)
+}
+
 interface HttpServiceParams {
     val targetHostname: String
     val targetPort: Int
@@ -691,6 +796,32 @@ data class GenerateCollaboratorPayload(
 @Serializable
 data class GetCollaboratorInteractions(
     val payloadId: String? = null
+)
+
+@Serializable
+data class GetActiveRepeaterRequest(
+    @SerialName("include_sensitive")
+    val includeSensitive: Boolean = false
+)
+
+@Serializable
+data class GetActiveRepeaterResponse(
+    @SerialName("include_sensitive")
+    val includeSensitive: Boolean = false
+)
+
+@Serializable
+data class GetRepeaterRequestByIndex(
+    val index: Int,
+    @SerialName("include_sensitive")
+    val includeSensitive: Boolean = false
+)
+
+@Serializable
+data class GetRepeaterResponseByIndex(
+    val index: Int,
+    @SerialName("include_sensitive")
+    val includeSensitive: Boolean = false
 )
 
 @Serializable
