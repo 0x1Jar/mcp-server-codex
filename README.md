@@ -10,6 +10,7 @@ For more information about the protocol visit: [modelcontextprotocol.io](https:/
 
 - Connect Burp Suite to AI clients through MCP
 - Automatic installation for Claude Desktop
+- Automatic installation for Codex
 - Comes with packaged Stdio MCP proxy server
 
 ## Usage
@@ -104,6 +105,16 @@ The extension has an installer which will automatically configure the client set
       ```
 
 3. **Restart Claude Desktop** - assuming Burp is running with the extension loaded.
+
+### Codex Client
+
+You can install Burp MCP settings for Codex directly from the extension UI:
+
+1. Open Burp `MCP` tab.
+2. In `Installation`, click **Install to Codex**.
+3. Restart Codex if it is currently running.
+
+The installer will update `~/.codex/config.toml` with a `mcp_servers.burp` entry that points to the packaged proxy JAR and your configured Burp SSE URL.
 
 ## Manual installations
 If you want to install the MCP server manually you can either use the extension's SSE server directly or the packaged
