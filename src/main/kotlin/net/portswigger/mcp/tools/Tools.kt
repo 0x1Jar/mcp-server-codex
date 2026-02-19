@@ -24,6 +24,7 @@ import java.awt.KeyboardFocusManager
 import java.util.regex.Pattern
 import javax.swing.JTabbedPane
 import javax.swing.JTextArea
+import javax.swing.SwingUtilities
 import javax.swing.text.JTextComponent
 
 private suspend fun checkHistoryPermissionOrDeny(
@@ -466,14 +467,32 @@ fun findRepeaterRequestTabsPane(repeaterContent: Component): JTabbedPane? {
     val panes = findDescendants(repeaterContent).filterIsInstance<JTabbedPane>().toList()
     if (panes.isEmpty()) return null
 
+    val rootWidth = repeaterContent.width.takeIf { it > 0 } ?: repeaterContent.preferredSize.width
+    val rootHeight = repeaterContent.height.takeIf { it > 0 } ?: repeaterContent.preferredSize.height
+    val normalizedRootWidth = if (rootWidth > 0) rootWidth else 1600
+    val normalizedRootHeight = if (rootHeight > 0) rootHeight else 900
+
     return panes.maxByOrNull { pane ->
         val titles = (0 until pane.tabCount).map { pane.getTitleAt(it).trim().lowercase() }
         val unknownTitles = titles.count { it.isNotBlank() && it !in knownRepeaterEditorTabs }
         val onlyKnownTitles = titles.all { it.isBlank() || it in knownRepeaterEditorTabs }
+        val numericTitles = titles.count { it.matches(Regex("^\\d+$")) }
+
+        val pointInRoot = runCatching {
+            SwingUtilities.convertPoint(pane.parent, pane.x, pane.y, repeaterContent)
+        }.getOrElse { java.awt.Point(pane.x, pane.y) }
+
+        val isTopArea = pointInRoot.y <= (normalizedRootHeight * 0.25)
+        val isLeftArea = pointInRoot.x <= (normalizedRootWidth * 0.4)
 
         var score = pane.tabCount * 10
         score += unknownTitles * 20
         if (onlyKnownTitles) score -= 15
+        score += numericTitles * 60
+
+        if (isTopArea) score += 40 else score -= 20
+        if (isLeftArea) score += 40 else score -= 25
+
         score
     }
 }

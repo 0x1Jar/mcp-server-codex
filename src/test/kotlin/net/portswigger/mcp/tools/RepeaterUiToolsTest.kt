@@ -13,16 +13,21 @@ class RepeaterUiToolsTest {
 
     @Test
     fun `findRepeaterRequestTabsPane should prefer user tab pane over editor subtabs`() {
-        val repeaterRoot = JPanel()
+        val repeaterRoot = JPanel().apply {
+            layout = null
+            setSize(1400, 900)
+        }
 
         val editorSubTabs = JTabbedPane().apply {
             addTab("Raw", JPanel())
             addTab("Hex", JPanel())
+            setBounds(120, 220, 420, 120)
         }
 
         val requestTabs = JTabbedPane().apply {
             addTab("Login Flow", JPanel())
             addTab("Search API", JPanel())
+            setBounds(10, 10, 260, 44)
         }
 
         repeaterRoot.add(editorSubTabs)
@@ -31,6 +36,34 @@ class RepeaterUiToolsTest {
         val detected = findRepeaterRequestTabsPane(repeaterRoot)
 
         assertSame(requestTabs, detected)
+    }
+
+    @Test
+    fun `findRepeaterRequestTabsPane should prefer top-left numbered tabs over right-side tabs`() {
+        val repeaterRoot = JPanel().apply {
+            layout = null
+            setSize(1800, 1000)
+        }
+
+        val topLeftNumberedTabs = JTabbedPane().apply {
+            addTab("1", JPanel())
+            addTab("2", JPanel())
+            setBounds(8, 8, 220, 44)
+        }
+
+        val rightSideTabs = JTabbedPane().apply {
+            addTab("Request attributes", JPanel())
+            addTab("Request headers", JPanel())
+            addTab("Response headers", JPanel())
+            setBounds(1300, 120, 420, 300)
+        }
+
+        repeaterRoot.add(rightSideTabs)
+        repeaterRoot.add(topLeftNumberedTabs)
+
+        val detected = findRepeaterRequestTabsPane(repeaterRoot)
+
+        assertSame(topLeftNumberedTabs, detected)
     }
 
     @Test
