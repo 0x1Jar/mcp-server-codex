@@ -3,7 +3,7 @@ package net.portswigger.mcp.diagnostics
 import kotlinx.serialization.Serializable
 import java.util.concurrent.ConcurrentHashMap
 
-private const val ACTIVE_WINDOW_MS = 15 * 60 * 1000L
+private const val ACTIVE_WINDOW_MS = 5 * 60 * 1000L
 
 @Serializable
 data class McpSessionStat(
@@ -91,13 +91,17 @@ object McpSessionRegistry {
         return sessions[sessionId]?.clientType == "unknown"
     }
 
-    fun snapshotActive(nowMs: Long = System.currentTimeMillis()): McpSessionStatsResult {
+    fun snapshotActive(
+        nowMs: Long = System.currentTimeMillis(),
+        includeProxy: Boolean = false
+    ): McpSessionStatsResult {
         val minActiveMs = nowMs - ACTIVE_WINDOW_MS
 
         sessions.entries.removeIf { (_, record) -> record.lastSeenAtMs < minActiveMs }
 
         val active = sessions.values
             .sortedByDescending { it.lastSeenAtMs }
+            .filter { includeProxy || it.clientType != "proxy" }
             .map {
                 McpSessionStat(
                     sessionId = it.sessionId,

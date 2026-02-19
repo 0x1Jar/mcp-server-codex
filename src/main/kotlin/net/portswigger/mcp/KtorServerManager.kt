@@ -123,7 +123,7 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
                 } else {
                     api.logging().logToOutput("MCP access scope: network/LAN (host: ${config.host})")
                 }
-                api.logging().logToOutput("MCP session tracking is active (auto-detect Codex/Claude/Gemini clients)")
+                api.logging().logToOutput("MCP session tracking is active (auto-detect Codex/Claude/Gemini/Proxy clients)")
                 callback(ServerState.Running)
 
             } catch (e: Exception) {
@@ -216,6 +216,7 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
             value.contains("codex") -> ClientType.CODEX
             value.contains("claude") -> ClientType.CLAUDE
             value.contains("gemini") -> ClientType.GEMINI
+            value.contains("burp-proxy") || value.contains("mcp-proxy") -> ClientType.PROXY
             else -> ClientType.UNKNOWN
         }
     }
@@ -297,6 +298,7 @@ private enum class ClientType(val label: String) {
     CODEX("codex"),
     CLAUDE("claude"),
     GEMINI("gemini"),
+    PROXY("proxy"),
     UNKNOWN("unknown")
 }
 

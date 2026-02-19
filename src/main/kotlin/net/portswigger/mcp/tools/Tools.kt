@@ -194,11 +194,10 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         api.utilities().randomUtils().randomString(length, characterSet)
     }
 
-    mcpTool(
-        "get_mcp_session_stats",
-        "Returns active MCP sessions and detected client type (codex/claude/gemini/unknown) for diagnostics and monitoring."
+    mcpTool<GetMcpSessionStats>(
+        "Returns active MCP sessions and detected client type (codex/claude/gemini/proxy/unknown). By default, proxy sessions are hidden unless include_proxy=true."
     ) {
-        Json.encodeToString(McpSessionRegistry.snapshotActive())
+        Json.encodeToString(McpSessionRegistry.snapshotActive(includeProxy = includeProxy))
     }
 
     mcpTool(
@@ -846,6 +845,12 @@ data class Base64Decode(val content: String)
 
 @Serializable
 data class GenerateRandomString(val length: Int, val characterSet: String)
+
+@Serializable
+data class GetMcpSessionStats(
+    @SerialName("include_proxy")
+    val includeProxy: Boolean = false
+)
 
 @Serializable
 data class SetProjectOptions(val json: String)

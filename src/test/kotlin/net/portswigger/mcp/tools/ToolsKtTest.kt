@@ -517,6 +517,21 @@ class ToolsKtTest {
                 assertTrue(text.contains("\"sessions\""))
             }
         }
+
+        @Test
+        fun `get mcp session stats should accept include proxy filter override`() {
+            runBlocking {
+                val result = client.callTool(
+                    "get_mcp_session_stats", mapOf(
+                        "include_proxy" to true
+                    )
+                )
+                delay(100)
+                val text = result.expectTextContent()
+                assertTrue(text.contains("\"activeSessionCount\""))
+                assertTrue(text.contains("\"sessions\""))
+            }
+        }
     }
     
     @Nested
