@@ -15,6 +15,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import net.portswigger.mcp.config.McpConfig
+import net.portswigger.mcp.diagnostics.McpSessionRegistry
 import net.portswigger.mcp.schema.toSerializableForm
 import net.portswigger.mcp.security.HistoryAccessSecurity
 import net.portswigger.mcp.security.HistoryAccessType
@@ -191,6 +192,13 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
 
     mcpTool<GenerateRandomString>("Generates a random string of specified length and character set") {
         api.utilities().randomUtils().randomString(length, characterSet)
+    }
+
+    mcpTool(
+        "get_mcp_session_stats",
+        "Returns active MCP sessions and detected client type (codex/claude/gemini/unknown) for diagnostics and monitoring."
+    ) {
+        Json.encodeToString(McpSessionRegistry.snapshotActive())
     }
 
     mcpTool(

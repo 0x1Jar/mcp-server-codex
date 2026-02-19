@@ -504,6 +504,20 @@ class ToolsKtTest {
             verify(exactly = 1) { randomUtils.randomString(any<Int>(), any<String>()) }
         }
     }
+
+    @Nested
+    inner class DiagnosticsToolsTests {
+        @Test
+        fun `get mcp session stats should return active sessions payload`() {
+            runBlocking {
+                val result = client.callTool("get_mcp_session_stats", emptyMap())
+                delay(100)
+                val text = result.expectTextContent()
+                assertTrue(text.contains("\"activeSessionCount\""))
+                assertTrue(text.contains("\"sessions\""))
+            }
+        }
+    }
     
     @Nested
     inner class ConfigurationToolsTests {

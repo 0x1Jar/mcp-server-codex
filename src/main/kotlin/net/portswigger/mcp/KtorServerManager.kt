@@ -19,9 +19,9 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import net.portswigger.mcp.config.McpConfig
+import net.portswigger.mcp.diagnostics.McpSessionRegistry
 import net.portswigger.mcp.tools.registerTools
 import java.net.URI
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -30,7 +30,6 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
 
     private var server: EmbeddedServer<*, *>? = null
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
-    private val sessionClients = ConcurrentHashMap<String, SessionClientInfo>()
     private val json = Json { ignoreUnknownKeys = true }
 
     override fun start(config: McpConfig, callback: (ServerState) -> Unit) {
@@ -40,6 +39,7 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
             try {
                 server?.stop(1000, 5000)
                 server = null
+                McpSessionRegistry.clear()
 
                 val mcpServer = Server(
                     serverInfo = Implementation("burp-suite", "1.1.2"), options = ServerOptions(
@@ -140,7 +140,7 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
             try {
                 server?.stop(1000, 5000)
                 server = null
-                sessionClients.clear()
+                McpSessionRegistry.clear()
                 api.logging().logToOutput("Stopped MCP server")
                 callback(ServerState.Stopped)
             } catch (e: Exception) {
@@ -153,18 +153,19 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
     override fun shutdown() {
         server?.stop(1000, 5000)
         server = null
-        sessionClients.clear()
+        McpSessionRegistry.clear()
 
         executor.shutdown()
         executor.awaitTermination(10, TimeUnit.SECONDS)
     }
 
     private suspend fun trackClientSession(call: ApplicationCall, userAgent: String?) {
-        if (call.request.httpMethod != HttpMethod.Post) return
-
         val sessionId = call.request.queryParameters["sessionId"]?.trim().orEmpty()
         if (sessionId.isEmpty()) return
-        if (sessionClients.containsKey(sessionId)) return
+        McpSessionRegistry.touch(sessionId)
+
+        if (call.request.httpMethod != HttpMethod.Post) return
+        if (McpSessionRegistry.contains(sessionId) && !McpSessionRegistry.isUnknownClient(sessionId)) return
 
         val body = runCatching { call.receiveText() }.getOrNull() ?: return
         if (!body.contains("\"method\":\"initialize\"")) return
@@ -180,22 +181,17 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
 
         val detection = detectClientType(clientName, userAgent)
 
-        val previous = sessionClients.putIfAbsent(
-            sessionId,
-            SessionClientInfo(
-                clientName = clientName ?: "unknown",
-                clientVersion = clientVersion,
-                userAgent = userAgent,
-                clientType = detection.clientType,
-                detectedBy = detection.detectedBy
-            )
+        McpSessionRegistry.upsert(
+            sessionId = sessionId,
+            clientType = detection.clientType.label,
+            clientName = clientName ?: "unknown",
+            clientVersion = clientVersion,
+            detectedBy = detection.detectedBy
         )
 
-        if (previous == null) {
-            api.logging().logToOutput(
-                "MCP client connected | session=$sessionId | type=${detection.clientType.label} | name=${clientName ?: "unknown"} | detectedBy=${detection.detectedBy}"
-            )
-        }
+        api.logging().logToOutput(
+            "MCP client connected | session=$sessionId | type=${detection.clientType.label} | name=${clientName ?: "unknown"} | detectedBy=${detection.detectedBy}"
+        )
     }
 
     private fun detectClientType(clientName: String?, userAgent: String?): ClientDetection {
@@ -305,14 +301,6 @@ private enum class ClientType(val label: String) {
 }
 
 private data class ClientDetection(
-    val clientType: ClientType,
-    val detectedBy: String
-)
-
-private data class SessionClientInfo(
-    val clientName: String,
-    val clientVersion: String?,
-    val userAgent: String?,
     val clientType: ClientType,
     val detectedBy: String
 )
