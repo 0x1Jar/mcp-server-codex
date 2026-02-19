@@ -6,6 +6,7 @@ import io.ktor.server.application.*
 import io.ktor.server.engine.*
 import io.ktor.server.netty.*
 import io.ktor.server.plugins.cors.routing.*
+import io.ktor.server.plugins.doublereceive.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.modelcontextprotocol.kotlin.sdk.Implementation
@@ -13,9 +14,14 @@ import io.modelcontextprotocol.kotlin.sdk.ServerCapabilities
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
 import io.modelcontextprotocol.kotlin.sdk.server.mcp
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import net.portswigger.mcp.config.McpConfig
 import net.portswigger.mcp.tools.registerTools
 import java.net.URI
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -24,6 +30,8 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
 
     private var server: EmbeddedServer<*, *>? = null
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val sessionClients = ConcurrentHashMap<String, SessionClientInfo>()
+    private val json = Json { ignoreUnknownKeys = true }
 
     override fun start(config: McpConfig, callback: (ServerState) -> Unit) {
         callback(ServerState.Starting)
@@ -42,6 +50,8 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
                 )
 
                 server = embeddedServer(Netty, port = config.port, host = config.host) {
+                    install(DoubleReceive)
+
                     install(CORS) {
                         allowHost("localhost:${config.port}")
                         allowHost("127.0.0.1:${config.port}")
@@ -86,6 +96,8 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
                             return@intercept
                         }
 
+                        trackClientSession(call, userAgent)
+
                         call.response.header("X-Frame-Options", "DENY")
                         call.response.header("X-Content-Type-Options", "nosniff")
                         call.response.header("Referrer-Policy", "same-origin")
@@ -111,6 +123,7 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
                 } else {
                     api.logging().logToOutput("MCP access scope: network/LAN (host: ${config.host})")
                 }
+                api.logging().logToOutput("MCP session tracking is active (auto-detect Codex/Claude/Gemini clients)")
                 callback(ServerState.Running)
 
             } catch (e: Exception) {
@@ -127,6 +140,7 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
             try {
                 server?.stop(1000, 5000)
                 server = null
+                sessionClients.clear()
                 api.logging().logToOutput("Stopped MCP server")
                 callback(ServerState.Stopped)
             } catch (e: Exception) {
@@ -139,9 +153,75 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
     override fun shutdown() {
         server?.stop(1000, 5000)
         server = null
+        sessionClients.clear()
 
         executor.shutdown()
         executor.awaitTermination(10, TimeUnit.SECONDS)
+    }
+
+    private suspend fun trackClientSession(call: ApplicationCall, userAgent: String?) {
+        if (call.request.httpMethod != HttpMethod.Post) return
+
+        val sessionId = call.request.queryParameters["sessionId"]?.trim().orEmpty()
+        if (sessionId.isEmpty()) return
+        if (sessionClients.containsKey(sessionId)) return
+
+        val body = runCatching { call.receiveText() }.getOrNull() ?: return
+        if (!body.contains("\"method\":\"initialize\"")) return
+
+        val parsed = runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull() ?: return
+        val method = parsed["method"]?.jsonPrimitive?.contentOrNull ?: return
+        if (method != "initialize") return
+
+        val params = parsed["params"]?.jsonObject
+        val clientInfo = params?.get("clientInfo")?.jsonObject
+        val clientName = clientInfo?.get("name")?.jsonPrimitive?.contentOrNull
+        val clientVersion = clientInfo?.get("version")?.jsonPrimitive?.contentOrNull
+
+        val detection = detectClientType(clientName, userAgent)
+
+        val previous = sessionClients.putIfAbsent(
+            sessionId,
+            SessionClientInfo(
+                clientName = clientName ?: "unknown",
+                clientVersion = clientVersion,
+                userAgent = userAgent,
+                clientType = detection.clientType,
+                detectedBy = detection.detectedBy
+            )
+        )
+
+        if (previous == null) {
+            api.logging().logToOutput(
+                "MCP client connected | session=$sessionId | type=${detection.clientType.label} | name=${clientName ?: "unknown"} | detectedBy=${detection.detectedBy}"
+            )
+        }
+    }
+
+    private fun detectClientType(clientName: String?, userAgent: String?): ClientDetection {
+        val fromName = classifyClient(clientName)
+        if (fromName != ClientType.UNKNOWN) {
+            return ClientDetection(fromName, "clientInfo.name")
+        }
+
+        val fromUa = classifyClient(userAgent)
+        if (fromUa != ClientType.UNKNOWN) {
+            return ClientDetection(fromUa, "user-agent")
+        }
+
+        return ClientDetection(ClientType.UNKNOWN, "unknown")
+    }
+
+    private fun classifyClient(raw: String?): ClientType {
+        val value = raw?.lowercase().orEmpty()
+        if (value.isBlank()) return ClientType.UNKNOWN
+
+        return when {
+            value.contains("codex") -> ClientType.CODEX
+            value.contains("claude") -> ClientType.CLAUDE
+            value.contains("gemini") -> ClientType.GEMINI
+            else -> ClientType.UNKNOWN
+        }
     }
 
     private fun isValidOrigin(origin: String): Boolean {
@@ -216,3 +296,23 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
         return normalized == "127.0.0.1" || normalized == "localhost" || normalized == "::1"
     }
 }
+
+private enum class ClientType(val label: String) {
+    CODEX("codex"),
+    CLAUDE("claude"),
+    GEMINI("gemini"),
+    UNKNOWN("unknown")
+}
+
+private data class ClientDetection(
+    val clientType: ClientType,
+    val detectedBy: String
+)
+
+private data class SessionClientInfo(
+    val clientName: String,
+    val clientVersion: String?,
+    val userAgent: String?,
+    val clientType: ClientType,
+    val detectedBy: String
+)

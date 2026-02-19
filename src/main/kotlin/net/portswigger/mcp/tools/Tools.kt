@@ -22,6 +22,7 @@ import net.portswigger.mcp.security.HttpRequestSecurity
 import java.awt.Component
 import java.awt.Container
 import java.awt.KeyboardFocusManager
+import java.lang.ref.WeakReference
 import java.util.regex.Pattern
 import javax.swing.JTabbedPane
 import javax.swing.JTextArea
@@ -540,8 +541,77 @@ data class RepeaterContext(
     val isRepeaterSelected: Boolean
 )
 
+private object RepeaterUiDetectionCache {
+    private const val CACHE_TTL_MS = 1500L
+
+    private var contextCachedAtMs: Long = 0L
+    private var contextFrameRef: WeakReference<Component>? = null
+    private var contextTopTabsRef: WeakReference<JTabbedPane>? = null
+    private var contextRepeaterContentRef: WeakReference<Component>? = null
+    private var contextRepeaterTabIndex: Int = -1
+
+    private var paneCachedAtMs: Long = 0L
+    private var paneRootRef: WeakReference<Component>? = null
+    private var paneRef: WeakReference<JTabbedPane>? = null
+
+    @Synchronized
+    fun getCachedContext(frame: Component): RepeaterContext? {
+        val now = System.currentTimeMillis()
+        if (now - contextCachedAtMs > CACHE_TTL_MS) return null
+
+        val cachedFrame = contextFrameRef?.get()
+        val cachedTopTabs = contextTopTabsRef?.get()
+        val cachedContent = contextRepeaterContentRef?.get()
+        val cachedIndex = contextRepeaterTabIndex
+
+        if (cachedFrame !== frame || cachedTopTabs == null || cachedContent == null) return null
+        if (cachedIndex !in 0 until cachedTopTabs.tabCount) return null
+        if (cachedTopTabs.getComponentAt(cachedIndex) !== cachedContent) return null
+        if (!isDescendantOf(frame, cachedTopTabs)) return null
+
+        return RepeaterContext(
+            repeaterContent = cachedContent,
+            isRepeaterSelected = cachedTopTabs.selectedIndex == cachedIndex
+        )
+    }
+
+    @Synchronized
+    fun cacheContext(frame: Component, topTabs: JTabbedPane, repeaterTabIndex: Int, repeaterContent: Component) {
+        contextFrameRef = WeakReference(frame)
+        contextTopTabsRef = WeakReference(topTabs)
+        contextRepeaterContentRef = WeakReference(repeaterContent)
+        contextRepeaterTabIndex = repeaterTabIndex
+        contextCachedAtMs = System.currentTimeMillis()
+    }
+
+    @Synchronized
+    fun getCachedTabsPane(repeaterContent: Component): JTabbedPane? {
+        val now = System.currentTimeMillis()
+        if (now - paneCachedAtMs > CACHE_TTL_MS) return null
+
+        val cachedRoot = paneRootRef?.get()
+        val cachedPane = paneRef?.get()
+
+        if (cachedRoot !== repeaterContent || cachedPane == null) return null
+        if (cachedPane.tabCount <= 0) return null
+        if (!isDescendantOf(repeaterContent, cachedPane)) return null
+
+        return cachedPane
+    }
+
+    @Synchronized
+    fun cacheTabsPane(repeaterContent: Component, tabsPane: JTabbedPane) {
+        paneRootRef = WeakReference(repeaterContent)
+        paneRef = WeakReference(tabsPane)
+        paneCachedAtMs = System.currentTimeMillis()
+    }
+}
+
 fun findRepeaterContext(api: MontoyaApi): RepeaterContext? {
     val frame = api.userInterface().swingUtils().suiteFrame()
+
+    RepeaterUiDetectionCache.getCachedContext(frame)?.let { return it }
+
     val topTabbedPanes = findDescendants(frame).filterIsInstance<JTabbedPane>().toList()
 
     for (tabs in topTabbedPanes) {
@@ -549,6 +619,7 @@ fun findRepeaterContext(api: MontoyaApi): RepeaterContext? {
             val title = tabs.getTitleAt(index).trim()
             if (title.equals("Repeater", ignoreCase = true)) {
                 val content = tabs.getComponentAt(index)
+                RepeaterUiDetectionCache.cacheContext(frame, tabs, index, content)
                 return RepeaterContext(
                     repeaterContent = content,
                     isRepeaterSelected = tabs.selectedIndex == index
@@ -561,6 +632,8 @@ fun findRepeaterContext(api: MontoyaApi): RepeaterContext? {
 }
 
 fun findRepeaterRequestTabsPane(repeaterContent: Component): JTabbedPane? {
+    RepeaterUiDetectionCache.getCachedTabsPane(repeaterContent)?.let { return it }
+
     val panes = findDescendants(repeaterContent).filterIsInstance<JTabbedPane>().toList()
     if (panes.isEmpty()) return null
 
@@ -569,7 +642,7 @@ fun findRepeaterRequestTabsPane(repeaterContent: Component): JTabbedPane? {
     val normalizedRootWidth = if (rootWidth > 0) rootWidth else 1600
     val normalizedRootHeight = if (rootHeight > 0) rootHeight else 900
 
-    return panes.maxByOrNull { pane ->
+    val detectedPane = panes.maxByOrNull { pane ->
         val titles = (0 until pane.tabCount).map { pane.getTitleAt(it).trim().lowercase() }
         val unknownTitles = titles.count { it.isNotBlank() && it !in knownRepeaterEditorTabs }
         val onlyKnownTitles = titles.all { it.isBlank() || it in knownRepeaterEditorTabs }
@@ -592,6 +665,11 @@ fun findRepeaterRequestTabsPane(repeaterContent: Component): JTabbedPane? {
 
         score
     }
+
+    if (detectedPane != null) {
+        RepeaterUiDetectionCache.cacheTabsPane(repeaterContent, detectedPane)
+    }
+    return detectedPane
 }
 
 fun extractBestHttpRequestText(component: Component): String? {
@@ -688,6 +766,10 @@ private fun findDescendants(root: Component): Sequence<Component> = sequence {
             yieldAll(findDescendants(child))
         }
     }
+}
+
+private fun isDescendantOf(root: Component, candidate: Component): Boolean {
+    return generateSequence(candidate) { it.parent }.any { it === root }
 }
 
 private fun JTabbedPane.getComponentAtOrNull(index: Int): Component? {

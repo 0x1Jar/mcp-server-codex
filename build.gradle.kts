@@ -44,6 +44,7 @@ dependencies {
     compileOnly(libs.burp.montoya.api)
 
     implementation(libs.bundles.ktor.server)
+    implementation("io.ktor:ktor-server-double-receive")
     implementation(libs.kotlin.stdlib)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.mcp.kotlin.sdk)
