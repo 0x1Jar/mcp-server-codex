@@ -306,30 +306,49 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
 
     mcpTool(
         "get_repeater_tabs",
-        "Lists visible Repeater request tabs from the Burp UI. Returns tab names and indicates which one is active."
+        "Lists visible Repeater request tabs from the Burp UI and returns structured JSON metadata."
     ) {
+        val allowed = runBlocking {
+            checkHistoryPermissionOrDeny(HistoryAccessType.REPEATER, config, api, "Repeater")
+        }
+        if (!allowed) {
+            return@mcpTool "Repeater access denied by Burp Suite"
+        }
+
         val repeaterContext = findRepeaterContext(api)
             ?: return@mcpTool "<Repeater tab not found in Burp UI>"
 
         val tabsPane = findRepeaterRequestTabsPane(repeaterContext.repeaterContent)
             ?: return@mcpTool "<Could not detect Repeater request tabs>"
 
-        val tabTitles = (0 until tabsPane.tabCount).map { index ->
-            val title = tabsPane.getTitleAt(index).ifBlank { "Tab ${index + 1}" }
-            if (index == tabsPane.selectedIndex) "* $title (active)" else "- $title"
+        val tabs = (0 until tabsPane.tabCount).map { index ->
+            RepeaterTabInfo(
+                index = index,
+                title = tabsPane.getTitleAt(index).ifBlank { "Tab ${index + 1}" },
+                isActive = index == tabsPane.selectedIndex
+            )
         }
 
-        if (tabTitles.isEmpty()) {
-            "<No Repeater request tabs>"
-        } else {
-            tabTitles.joinToString("\n")
-        }
+        Json.encodeToString(
+            RepeaterTabsResult(
+                isRepeaterToolActive = repeaterContext.isRepeaterSelected,
+                tabCount = tabs.size,
+                tabs = tabs
+            )
+        )
     }
 
     mcpTool(
         "get_active_repeater_request",
         "Reads the raw HTTP request from the currently active Repeater request tab. Repeater must be the active Burp tool tab."
     ) {
+        val allowed = runBlocking {
+            checkHistoryPermissionOrDeny(HistoryAccessType.REPEATER, config, api, "Repeater")
+        }
+        if (!allowed) {
+            return@mcpTool "Repeater access denied by Burp Suite"
+        }
+
         val repeaterContext = findRepeaterContext(api)
             ?: return@mcpTool "<Repeater tab not found in Burp UI>"
 
@@ -347,6 +366,36 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             ?: return@mcpTool "<Could not read raw request from active Repeater tab>"
 
         rawRequest
+    }
+
+    mcpTool(
+        "get_active_repeater_response",
+        "Reads the raw HTTP response from the currently active Repeater request tab. Repeater must be the active Burp tool tab."
+    ) {
+        val allowed = runBlocking {
+            checkHistoryPermissionOrDeny(HistoryAccessType.REPEATER, config, api, "Repeater")
+        }
+        if (!allowed) {
+            return@mcpTool "Repeater access denied by Burp Suite"
+        }
+
+        val repeaterContext = findRepeaterContext(api)
+            ?: return@mcpTool "<Repeater tab not found in Burp UI>"
+
+        if (!repeaterContext.isRepeaterSelected) {
+            return@mcpTool "<Repeater is not currently the active Burp tool tab>"
+        }
+
+        val tabsPane = findRepeaterRequestTabsPane(repeaterContext.repeaterContent)
+            ?: return@mcpTool "<Could not detect Repeater request tabs>"
+
+        val selectedTab = tabsPane.selectedComponent
+            ?: return@mcpTool "<No active Repeater request tab>"
+
+        val rawResponse = extractBestHttpResponseText(selectedTab)
+            ?: return@mcpTool "<Could not read raw response from active Repeater tab>"
+
+        rawResponse
     }
 
     mcpTool<SetActiveEditorContents>("Sets the content of the user's active message editor") {
@@ -430,6 +479,22 @@ fun findRepeaterRequestTabsPane(repeaterContent: Component): JTabbedPane? {
 }
 
 fun extractBestHttpRequestText(component: Component): String? {
+    val candidates = collectTextCandidates(component)
+
+    if (candidates.isEmpty()) return null
+
+    return candidates.maxByOrNull { scoreHttpRequestCandidate(it) }
+}
+
+fun extractBestHttpResponseText(component: Component): String? {
+    val candidates = collectTextCandidates(component)
+
+    if (candidates.isEmpty()) return null
+
+    return candidates.maxByOrNull { scoreHttpResponseCandidate(it) }
+}
+
+private fun collectTextCandidates(component: Component): List<String> {
     val candidates = mutableListOf<String>()
 
     for (child in findDescendants(component)) {
@@ -455,9 +520,7 @@ fun extractBestHttpRequestText(component: Component): String? {
         }
     }
 
-    if (candidates.isEmpty()) return null
-
-    return candidates.maxByOrNull { scoreHttpRequestCandidate(it) }
+    return candidates
 }
 
 private fun scoreHttpRequestCandidate(text: String): Int {
@@ -473,6 +536,32 @@ private fun scoreHttpRequestCandidate(text: String): Int {
     if (text.contains("\r\n\r\n") || text.contains("\n\n")) score += 20
 
     score += minOf(text.length, 4000) / 20
+    return score
+}
+
+private fun scoreHttpResponseCandidate(text: String): Int {
+    var score = 0
+
+    val responseLineRegex = Regex("^HTTP/\\d(?:\\.\\d)?\\s+\\d{3}\\b", RegexOption.MULTILINE)
+    if (responseLineRegex.containsMatchIn(text)) score += 220
+
+    val requestLineRegex = Regex(
+        "^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|CONNECT)\\s+\\S+\\s+HTTP/\\d(?:\\.\\d)?",
+        RegexOption.MULTILINE
+    )
+    if (requestLineRegex.containsMatchIn(text)) score -= 120
+
+    if (text.contains("\nContent-Type:", ignoreCase = true) || text.contains(
+            "\r\nContent-Type:",
+            ignoreCase = true
+        )
+    ) {
+        score += 40
+    }
+
+    if (text.contains("\r\n\r\n") || text.contains("\n\n")) score += 20
+    score += minOf(text.length, 4000) / 20
+
     return score
 }
 
@@ -583,4 +672,18 @@ data class GenerateCollaboratorPayload(
 @Serializable
 data class GetCollaboratorInteractions(
     val payloadId: String? = null
+)
+
+@Serializable
+data class RepeaterTabInfo(
+    val index: Int,
+    val title: String,
+    val isActive: Boolean
+)
+
+@Serializable
+data class RepeaterTabsResult(
+    val isRepeaterToolActive: Boolean,
+    val tabCount: Int,
+    val tabs: List<RepeaterTabInfo>
 )

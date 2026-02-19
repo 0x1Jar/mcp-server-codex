@@ -7,7 +7,7 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
 enum class HistoryAccessType() {
-    HTTP_HISTORY(), WEBSOCKET_HISTORY();
+    HTTP_HISTORY(), WEBSOCKET_HISTORY(), REPEATER();
 }
 
 interface HistoryAccessApprovalHandler {
@@ -23,17 +23,18 @@ class SwingHistoryAccessApprovalHandler : HistoryAccessApprovalHandler {
                 val historyTypeName = when (accessType) {
                     HistoryAccessType.HTTP_HISTORY -> "HTTP history"
                     HistoryAccessType.WEBSOCKET_HISTORY -> "WebSocket history"
+                    HistoryAccessType.REPEATER -> "Repeater"
                 }
 
                 val message = buildString {
-                    appendLine("An MCP client is requesting access to your Burp Suite $historyTypeName.")
+                    appendLine("An MCP client is requesting access to your Burp Suite $historyTypeName data.")
                     appendLine()
-                    appendLine("This may include sensitive data from previous web sessions.")
+                    appendLine("This may include sensitive request/response data.")
                     appendLine("Choose how you would like to respond:")
                 }
 
                 val options = arrayOf(
-                    "Allow Once", "Always Allow $historyTypeName", "Deny"
+                    "Allow Once", "Always Allow $historyTypeName access", "Deny"
                 )
 
                 val burpFrame = findBurpFrame()
@@ -51,6 +52,7 @@ class SwingHistoryAccessApprovalHandler : HistoryAccessApprovalHandler {
                         when (accessType) {
                             HistoryAccessType.HTTP_HISTORY -> config.alwaysAllowHttpHistory = true
                             HistoryAccessType.WEBSOCKET_HISTORY -> config.alwaysAllowWebSocketHistory = true
+                            HistoryAccessType.REPEATER -> config.alwaysAllowRepeaterAccess = true
                         }
                         continuation.resume(true)
                     }
@@ -78,6 +80,7 @@ object HistoryAccessSecurity {
         val isAlwaysAllowed = when (accessType) {
             HistoryAccessType.HTTP_HISTORY -> config.alwaysAllowHttpHistory
             HistoryAccessType.WEBSOCKET_HISTORY -> config.alwaysAllowWebSocketHistory
+            HistoryAccessType.REPEATER -> config.alwaysAllowRepeaterAccess
         }
 
         if (isAlwaysAllowed) {
