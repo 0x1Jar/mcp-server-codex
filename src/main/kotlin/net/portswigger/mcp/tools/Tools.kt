@@ -18,9 +18,13 @@ import net.portswigger.mcp.schema.toSerializableForm
 import net.portswigger.mcp.security.HistoryAccessSecurity
 import net.portswigger.mcp.security.HistoryAccessType
 import net.portswigger.mcp.security.HttpRequestSecurity
+import java.awt.Component
+import java.awt.Container
 import java.awt.KeyboardFocusManager
 import java.util.regex.Pattern
+import javax.swing.JTabbedPane
 import javax.swing.JTextArea
+import javax.swing.text.JTextComponent
 
 private suspend fun checkHistoryPermissionOrDeny(
     accessType: HistoryAccessType, config: McpConfig, api: MontoyaApi, logMessage: String
@@ -300,6 +304,51 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         getActiveEditor(api)?.text ?: "<No active editor>"
     }
 
+    mcpTool(
+        "get_repeater_tabs",
+        "Lists visible Repeater request tabs from the Burp UI. Returns tab names and indicates which one is active."
+    ) {
+        val repeaterContext = findRepeaterContext(api)
+            ?: return@mcpTool "<Repeater tab not found in Burp UI>"
+
+        val tabsPane = findRepeaterRequestTabsPane(repeaterContext.repeaterContent)
+            ?: return@mcpTool "<Could not detect Repeater request tabs>"
+
+        val tabTitles = (0 until tabsPane.tabCount).map { index ->
+            val title = tabsPane.getTitleAt(index).ifBlank { "Tab ${index + 1}" }
+            if (index == tabsPane.selectedIndex) "* $title (active)" else "- $title"
+        }
+
+        if (tabTitles.isEmpty()) {
+            "<No Repeater request tabs>"
+        } else {
+            tabTitles.joinToString("\n")
+        }
+    }
+
+    mcpTool(
+        "get_active_repeater_request",
+        "Reads the raw HTTP request from the currently active Repeater request tab. Repeater must be the active Burp tool tab."
+    ) {
+        val repeaterContext = findRepeaterContext(api)
+            ?: return@mcpTool "<Repeater tab not found in Burp UI>"
+
+        if (!repeaterContext.isRepeaterSelected) {
+            return@mcpTool "<Repeater is not currently the active Burp tool tab>"
+        }
+
+        val tabsPane = findRepeaterRequestTabsPane(repeaterContext.repeaterContent)
+            ?: return@mcpTool "<Could not detect Repeater request tabs>"
+
+        val selectedTab = tabsPane.selectedComponent
+            ?: return@mcpTool "<No active Repeater request tab>"
+
+        val rawRequest = extractBestHttpRequestText(selectedTab)
+            ?: return@mcpTool "<Could not read raw request from active Repeater tab>"
+
+        rawRequest
+    }
+
     mcpTool<SetActiveEditorContents>("Sets the content of the user's active message editor") {
         val editor = getActiveEditor(api) ?: return@mcpTool "<No active editor>"
 
@@ -325,6 +374,114 @@ fun getActiveEditor(api: MontoyaApi): JTextArea? {
         permanentFocusOwner
     } else {
         null
+    }
+}
+
+private val knownRepeaterEditorTabs = setOf(
+    "request",
+    "response",
+    "raw",
+    "pretty",
+    "hex",
+    "params",
+    "inspector",
+    "render"
+)
+
+data class RepeaterContext(
+    val repeaterContent: Component,
+    val isRepeaterSelected: Boolean
+)
+
+fun findRepeaterContext(api: MontoyaApi): RepeaterContext? {
+    val frame = api.userInterface().swingUtils().suiteFrame()
+    val topTabbedPanes = findDescendants(frame).filterIsInstance<JTabbedPane>().toList()
+
+    for (tabs in topTabbedPanes) {
+        for (index in 0 until tabs.tabCount) {
+            val title = tabs.getTitleAt(index).trim()
+            if (title.equals("Repeater", ignoreCase = true)) {
+                val content = tabs.getComponentAt(index)
+                return RepeaterContext(
+                    repeaterContent = content,
+                    isRepeaterSelected = tabs.selectedIndex == index
+                )
+            }
+        }
+    }
+
+    return null
+}
+
+fun findRepeaterRequestTabsPane(repeaterContent: Component): JTabbedPane? {
+    val panes = findDescendants(repeaterContent).filterIsInstance<JTabbedPane>().toList()
+    if (panes.isEmpty()) return null
+
+    return panes.maxByOrNull { pane ->
+        val titles = (0 until pane.tabCount).map { pane.getTitleAt(it).trim().lowercase() }
+        val unknownTitles = titles.count { it.isNotBlank() && it !in knownRepeaterEditorTabs }
+        val onlyKnownTitles = titles.all { it.isBlank() || it in knownRepeaterEditorTabs }
+
+        var score = pane.tabCount * 10
+        score += unknownTitles * 20
+        if (onlyKnownTitles) score -= 15
+        score
+    }
+}
+
+fun extractBestHttpRequestText(component: Component): String? {
+    val candidates = mutableListOf<String>()
+
+    for (child in findDescendants(component)) {
+        when (child) {
+            is JTextComponent -> {
+                val text = child.text?.trim().orEmpty()
+                if (text.isNotBlank()) candidates.add(text)
+            }
+
+            else -> {
+                try {
+                    val method = child.javaClass.methods.firstOrNull {
+                        it.name == "getText" && it.parameterCount == 0 && it.returnType == String::class.java
+                    }
+                    val text = method?.invoke(child) as? String
+                    if (!text.isNullOrBlank()) {
+                        candidates.add(text.trim())
+                    }
+                } catch (_: Exception) {
+                    // Best-effort UI scraping only.
+                }
+            }
+        }
+    }
+
+    if (candidates.isEmpty()) return null
+
+    return candidates.maxByOrNull { scoreHttpRequestCandidate(it) }
+}
+
+private fun scoreHttpRequestCandidate(text: String): Int {
+    var score = 0
+
+    val requestLineRegex = Regex(
+        "^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|CONNECT)\\s+\\S+\\s+HTTP/\\d(?:\\.\\d)?",
+        RegexOption.MULTILINE
+    )
+    if (requestLineRegex.containsMatchIn(text)) score += 200
+    if (text.startsWith("HTTP/")) score -= 100
+    if (text.contains("\nHost:", ignoreCase = true) || text.contains("\r\nHost:", ignoreCase = true)) score += 40
+    if (text.contains("\r\n\r\n") || text.contains("\n\n")) score += 20
+
+    score += minOf(text.length, 4000) / 20
+    return score
+}
+
+private fun findDescendants(root: Component): Sequence<Component> = sequence {
+    yield(root)
+    if (root is Container) {
+        for (child in root.components) {
+            yieldAll(findDescendants(child))
+        }
     }
 }
 
