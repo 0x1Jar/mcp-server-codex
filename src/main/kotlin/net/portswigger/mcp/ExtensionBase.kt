@@ -14,6 +14,7 @@ class ExtensionBase : BurpExtension {
 
     override fun initialize(api: MontoyaApi) {
         api.extension().setName("Burp MCP Server")
+        api.logging().logToOutput("Burp MCP extension loaded. Open the MCP tab to configure server and installation.")
 
         val config = McpConfig(api.persistence().extensionData(), api.logging())
         val serverManager = KtorServerManager(api)
@@ -51,9 +52,12 @@ class ExtensionBase : BurpExtension {
         }
 
         if (config.enabled) {
+            api.logging().logToOutput("MCP auto-start is enabled. Starting server...")
             serverManager.start(config) { state ->
                 configUi.updateServerState(state)
             }
+        } else {
+            api.logging().logToOutput("MCP server is currently disabled. Enable it from the MCP tab when ready.")
         }
     }
 }

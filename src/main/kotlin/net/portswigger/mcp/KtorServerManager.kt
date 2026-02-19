@@ -101,7 +101,16 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
                     start(wait = false)
                 }
 
+                val baseUrl = buildBaseUrl(config.host, config.port)
                 api.logging().logToOutput("Started MCP server on ${config.host}:${config.port}")
+                api.logging().logToOutput("MCP ready to use | endpoint: $baseUrl/")
+                api.logging().logToOutput("MCP JSON-RPC endpoint: $baseUrl/?sessionId=<id>")
+
+                if (isLoopbackHost(config.host)) {
+                    api.logging().logToOutput("MCP access scope: local-only (loopback host)")
+                } else {
+                    api.logging().logToOutput("MCP access scope: network/LAN (host: ${config.host})")
+                }
                 callback(ServerState.Running)
 
             } catch (e: Exception) {
@@ -191,5 +200,19 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
         } catch (_: Exception) {
             return false
         }
+    }
+
+    private fun buildBaseUrl(host: String, port: Int): String {
+        val trimmed = host.trim()
+        val normalizedHost = when {
+            trimmed.contains(":") && !trimmed.startsWith("[") && !trimmed.endsWith("]") -> "[$trimmed]"
+            else -> trimmed
+        }
+        return "http://$normalizedHost:$port"
+    }
+
+    private fun isLoopbackHost(host: String): Boolean {
+        val normalized = host.trim().removePrefix("[").removeSuffix("]").lowercase()
+        return normalized == "127.0.0.1" || normalized == "localhost" || normalized == "::1"
     }
 }
